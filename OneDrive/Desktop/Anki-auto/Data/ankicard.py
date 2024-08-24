@@ -37,7 +37,7 @@ def get_model_templates(model_name):
 def get_model_field_names(model_name):
     return invoke('modelFieldNames', {'modelName': model_name})
 
-def language_fields_generator(word, model_name):
+def Core_2000_fields_generator(word, model_name):
     field_list = get_model_field_names(model_name)
     field_dict = {key: '' for key in field_list}
     pass        # todo
