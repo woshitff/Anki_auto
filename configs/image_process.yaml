@@ -1,0 +1,43 @@
+# This file is used to configure the image processing module of Anki-auto.
+
+Data_Params:
+
+  image_path: 'C:\\Users\\chait\\Desktop\\Anki-auto\\Dataset\\Image\\origin_img\\week_226.png'
+
+Binarization_Params:
+
+  Utils:
+    right_margin_threshold: 30
+    left_margin_threshold: 15
+    
+  Make_white_bg:
+    low_green: [60, 255, 255]
+    high_green: [60, 255, 255]
+
+  Gamma_correction: 
+    gamma: 1.0 
+
+  Histogram_equalization:
+    method: 'clahe'
+    clahe:
+      clip_limit: 2.0
+      tile_grid_size: [8, 8]
+    hist: {}
+      
+  Thresholding_Binarization:
+    method: 'manual'
+    # Choose one of the following methods:
+    # - otsu
+    # - manual
+    # - adaptive
+    otsu: {}
+    manual:
+      threshold: 200
+    adaptive:
+      block_size: 11
+      c: 2  
+
+SR_Params:
+  modal: 'binary'       # options: 'green', 'gray', 'gray_gamma', 'gray_equalized', 'binary'
+  scale: 8
+  sr_method: 'None'    # options: 'CUBIC', 'RealESRGAN', 'None'
