@@ -1,6 +1,9 @@
 import os 
 import subprocess
 from typing import Sequence
+from contextlib import contextmanager
+import functools   
+import time
 
 import numpy as np
 from sklearn.cluster import KMeans
@@ -8,8 +11,6 @@ from sklearn.metrics import silhouette_score
 from itertools import pairwise
 import cv2
 
-import functools   
-import time
 # from realesrgan import RealESRGAN
 
 #-------OCR前的图片预处理-------
@@ -69,7 +70,14 @@ def log_function_call(func):
         return result
     return wrapper
 
-class ShapeMatrixCreator:
+@contextmanager
+def ensure_directory_exists(directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    yield  
+
+# for contour generation
+class ShapeMatrixCreator: # todo
     """
     用于创建形状矩阵的类
     """
@@ -176,31 +184,29 @@ class ImagePreprocessing:
         cv2.imwrite(f'{self.template_img_dir}/img_clip/origin_img.jpg', self.img)
 
         green_img, mask = self.segmentation._get_green_regions(self.img)
-        contours = self.segmentation._get_contours(mask)
+        with ensure_directory_exists(f'{self.template_img_dir}/img_clip'):
+            cv2.imwrite(f'{self.template_img_dir}/img_clip/word.jpg', green_img)
 
-        if not os.path.exists(f'{self.template_img_dir}/img_clip/contour/origin_contour'):
-            os.makedirs(f'{self.template_img_dir}/img_clip/contour/origin_contour')
-        for i, contour in enumerate(contours):
-            self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/contour_{i}.jpg')
-            self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
+        contours = self.segmentation._get_contours(mask)
+        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/origin_contour'):
+            for i, contour in enumerate(contours):
+                self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/contour_{i}.jpg')
+                self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
 
         filtered_contours = self.segmentation._devide_contours(contours)
-        if not os.path.exists(f'{self.template_img_dir}/img_clip/contour/devided_contour'):
-                os.makedirs(f'{self.template_img_dir}/img_clip/contour/devided_contour')
-        for i, contour in enumerate(filtered_contours):
-            self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/devided_contour/contour_{i}.jpg')
+        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/devided_contour'):
+            for i, contour in enumerate(filtered_contours):
+                self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/devided_contour/contour_{i}.jpg')
         
         crop_imgs = self.segmentation._crop_imgs_by_contours(filtered_contours, green_img)
 
         refined_crop_imgs = [self.segmentation._refine_crop_img(crop_img) for crop_img in crop_imgs]
         # refined_crop_imgs = [self.segmentation._refine_crop_img(crop_imgs[5])]
+        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/word_crop_refined'):
+            for i, refined_crop_img in enumerate(refined_crop_imgs):
+                cv2.imwrite(f'{self.template_img_dir}/img_clip/word_crop_refined/word_{i}_crop_refined.jpg', refined_crop_img)
 
-        for i, refined_crop_img in enumerate(refined_crop_imgs):
-            if not os.path.exists(f'{self.template_img_dir}/img_clip/word_crop_refined'):
-                os.makedirs(f'{self.template_img_dir}/img_clip/word_crop_refined')
-            cv2.imwrite(f'{self.template_img_dir}/img_clip/word_crop_refined/word_{i}_crop_refined.jpg', refined_crop_img)
-
-        print(f'Image clip finished. Total number of words: {len(refined_crop_imgs)}')
+        print(f'Image segmentation finished. Total number of words: {len(refined_crop_imgs)}')
 
         return refined_crop_imgs
 
@@ -255,6 +261,8 @@ class ImagePreprocessing:
 
             save_index += 1
 
+        print(f'Image enhancement finished. Total number of words: {len(crop_imgs)}')
+
     @log_function_call
     def process_sr(self,
                     modal: str = "binary",
@@ -300,7 +308,7 @@ class ImagePreprocessing:
                 cv2.imwrite(output_img_path, img)
             else:
                 raise ValueError(f"Invalid method: {sr_method}")
-        print("SR finished.")
+        print("Image SR finished.")
         return input_dir, output_dir
 
     class ImageSegmentation:
@@ -366,10 +374,10 @@ class ImagePreprocessing:
             # 通过掩模获取原图中的绿色区域
             green_img = cv2.bitwise_and(img, img, mask=mask)  
             # green_img[cv2.bitwise_not(mask)==255] = [255,255,255]
-            if img is self.parent.img:
-                if not os.path.exists(f'{self.parent.template_img_dir}/img_clip'):
-                    os.makedirs(f'{self.parent.template_img_dir}/img_clip')
-                cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word.jpg', green_img)
+            # if img is self.parent.img:
+            #     if not os.path.exists(f'{self.parent.template_img_dir}/img_clip'):
+            #         os.makedirs(f'{self.parent.template_img_dir}/img_clip')
+            #     cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word.jpg', green_img)
 
             return green_img, mask
        
@@ -428,7 +436,7 @@ class ImagePreprocessing:
             """
             pass # todo
 
-        def __generate_line_contours(self, points):
+        def __generate_line_contours(self, points): # todo
             """
             根据给定的点生成文本行的矩形轮廓，进行 x 方向上的分组并根据 y 坐标差异进行过滤。
             
@@ -482,7 +490,7 @@ class ImagePreprocessing:
                 filtered_contours_list.append(points)
             return filtered_contours_list
 
-        def __devide_per_contour(self, contour):
+        def __devide_per_contour(self, contour): # todo
             """
             将轮廓分割成多个点并分组,组合成新的轮廓
             Args:
@@ -490,7 +498,7 @@ class ImagePreprocessing:
             Returns:
                 new_contour (list): 新的轮廓
             """
-            print('contour', contour)
+            # print('contour', contour)
             points = contour[:, 0, :]
             points = sorted(points, key=lambda p: p[1])
             # points = self.__points_enhancer(points)
@@ -504,23 +512,23 @@ class ImagePreprocessing:
                     rows.append(current_row)
                     current_row = [points[i]]
             rows.append(current_row)
-            print('number of rows', len(rows))
-            print('rows', rows)
+            # print('number of rows', len(rows))
+            # print('rows', rows)
 
             merged_rows = []
             for row1, row2 in zip(rows[:-1], rows[1:]):
                 merged_row = row1 + row2
                 merged_rows.append(merged_row)
             # print('merged_rows', merged_rows)
-            print('merged_rows', merged_rows)
+            # print('merged_rows', merged_rows)
             new_contours = []
             for i, rows in enumerate(merged_rows):
                 contours = self.__generate_line_contours(rows)
-                print(f'contours in row {i}: {contours}')
+                # print(f'contours in row {i}: {contours}')
                 new_contours.append(contours)
             
             new_contours = [c for sublist in new_contours for c in sublist]
-            print('new_contours', new_contours)
+            # print('new_contours', new_contours)
             return new_contours
         
         def _devide_contours(self, \
@@ -886,4 +894,4 @@ class ImagePreprocessing:
 if __name__ == '__main__':
     origin_img_path = 'C:\\Users\\chait\\Desktop\\Anki-auto\\Dataset\\Image\\origin_img\\1.png'
     preprocessor = ImagePreprocessing(origin_img_path, week_num=3)
-    preprocessor.transform_img_to_binary()
+    
