@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 from sklearn.cluster import KMeans
+from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.metrics import silhouette_score
 from itertools import pairwise
 import cv2
@@ -83,7 +84,7 @@ class ShapeMatrixCreator: # todo
     """
     def __init__(self):
         pass
-    def optimal_k(self, points, method='elbow'):
+    def optimal_k(self, points, method='elbow'):# 可以先写个按y坐标获得最佳聚类数量的方法 todo
         """
         使用肘部法或轮廓系数计算最佳聚类数量。
 
@@ -118,10 +119,72 @@ class ShapeMatrixCreator: # todo
 
             return best_k
 
+        elif method == 'manual_group_by_height':
+            pass
         else:
             raise ValueError("Method must be 'elbow' or 'silhouette'.")
     
-    def create_shape_matrix(self, points):
+    def initial_cluster(self, points, cluster_method='Hierarchical Clustering', cluster_params=None):# todo
+        """
+        对points进行初步聚类。主要目的是获得按y坐标分类的个数, 以及按照y坐标分类, 注意这里按y坐标分类个数不一定是通过聚类算法得到的, 可能是通过其他方法得到的
+
+        parms:
+            points: 输入点的坐标，形状为(N, 2)的numpy数组。
+            cluster_method: 选择的聚类方法，'KMeans'或'Hierarchical Clustering'。
+            cluster_params: 聚类方法的参数。
+        return:
+            labeled_points: 聚类后的点。(N, 3)的numpy数组。包含坐标及聚类标签。
+        """
+        if cluster_params is None:
+            cluster_params = {}
+        if cluster_method == 'Hierarchical Clustering':
+            z = linkage(points, method='ward', metric='euclidean')
+            clusters = fcluster(z, t=2, criterion='distance')
+        elif cluster_method == 'KMeans':
+            pass
+        else:
+            raise ValueError("Method is not supported.")
+
+        labeled_points = np.hstack((points, clusters.reshape(-1, 1)))
+
+        return labeled_points
+
+    def refine_clusters(self, labeled_points):# todo
+        """
+        对初步聚类的结果进行细化, 对每个子类进行聚类
+        parms:
+            labeled_points: 聚类后的点。(N, 3)的numpy数组。包含坐标及聚类标签。
+        return:
+            refined_points: 细化后的点。(N, 3)的numpy数组。包含坐标及聚类标签。
+        """
+        pass
+    
+    def categorize_clusters(self, labeled_points):# todo
+        """
+        对前两步聚类的结果进行分类, 最终返回二维分类结果, 主要是为了统一不同纵坐标的横坐标聚类结果
+
+        Parameters
+        ----------
+        labeled_points : numpy.ndarray
+            聚类后的点。形状为 (N, 4) 的数组，包含坐标及横纵向聚类标签。
+
+        Returns
+        -------
+        categories : numpy.ndarray
+            分类结果。形状为 (N, 4) 的数组，包含坐标及二维分类标签。
+
+        Examples
+        --------
+        >>> labeled_points = np.array([[1, 1, 0, 0], [2, 2, 0, 0], [3, 3, 0, 1], [4, 4, 1, 1]])
+        >>> categorize_clusters(labeled_points)
+        array([[1, 1, 0, 0],
+               [2, 2, 0, 0],
+               [3, 3, 1, 1],
+               [4, 4, 2, 1]])
+        """
+        pass
+
+    def create_shape_matrix(self, points):# todo
         """
         根据给定的点生成形状矩阵。
         
@@ -192,6 +255,7 @@ class ImagePreprocessing:
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/origin_contour'):
             for i, contour in enumerate(contours):
                 self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/contour_{i}.jpg')
+                print('contour:', contour)
                 self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
 
         filtered_contours = self.segmentation._devide_contours(contours)
