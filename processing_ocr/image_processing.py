@@ -77,7 +77,7 @@ def ensure_directory_exists(directory):
         os.makedirs(directory)
     yield  
 
-# for contour generation
+### for contour generation
 class ShapeMatrixCreator: # todo
     """
     用于创建形状矩阵的类
