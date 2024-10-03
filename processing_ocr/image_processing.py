@@ -130,7 +130,8 @@ class ShapeMatrixCreator: # todo
         """
         n_classes_row = self.optimal_k(points[:, 1].reshape(-1, 1))
         n_classes_col = self.optimal_k(points[:, 0].reshape(-1, 1))
-        
+        # print(f"n_classes_row: {n_classes_row}, n_classes_col: {n_classes_col}")
+    
         shape_matrix = np.zeros((n_classes_row, n_classes_col), dtype=int)
 
         row_labels = KMeans(n_clusters=n_classes_row).fit_predict(points[:, 1].reshape(-1, 1))
@@ -156,7 +157,7 @@ class ShapeMatrixCreator: # todo
             col = int(sorted_x_points[i][3])  
             shape_matrix[row, col] = 1  
 
-        return shape_matrix
+        return shape_matrix, n_classes_col, n_classes_row
 
 # --------OCR前的图片预处理--------
 
@@ -482,7 +483,7 @@ class ImagePreprocessing:
                 group = np.array(group).reshape(-1, 1, 2).astype(np.int32)  # 转换为 OpenCV 轮廓格式
                 filtered_points_list.append(group)
             # assert len(filtered_points_list) >= 2, 'filtered_points_list should have at least 2 elements'
-            print('filtered_points_list', filtered_points_list)
+            # print('filtered_points_list', filtered_points_list)
 
             filtered_contours_list = []
             for points1, points2 in pairwise(filtered_points_list):
@@ -553,7 +554,7 @@ class ImagePreprocessing:
                         np.array([[[20, 20], [100, 20], [100, 100], [20, 100]]])]
             """
             filtered_contours = []
-            print('len(contours)', len(contours))
+            # print('len(contours)', len(contours))
             # 处理图像纵向分割
             heights = [cv2.boundingRect(c)[3] for c in contours]
             median_height = np.median(heights)
@@ -562,7 +563,7 @@ class ImagePreprocessing:
             for i, contour in enumerate(contours):
                 new_contour = self.__devide_per_contour(contour)
                 filtered_contours.append(new_contour)
-            print('len(filtered_contours)', len(filtered_contours))
+            # print('len(filtered_contours)', len(filtered_contours))
 
             filtered_contours = [c for sublist in filtered_contours for c in sublist]
             sorted_contours = self.__sort_contours(filtered_contours, median_height*0.5)
@@ -845,6 +846,9 @@ class ImagePreprocessing:
             cv2.imwrite(output_path, visualization)
         
         def visualize_and_save_shapematrix(self, img, contours, output_path):
+            """
+            将轮廓绘制在图片上,并绘制其形状矩阵以及行列类别数量
+            """
             visualization = img.copy()
             cv2.drawContours(visualization, contours, -1, (0, 0, 255), 2)
             for i, contour in enumerate(contours):
@@ -858,7 +862,7 @@ class ImagePreprocessing:
                             img.shape[0]/1000, (255, 0, 0), 2)  
                 
             points = contours[:, 0, :]
-            shape_matrix = self.parent.shape_matrix_creator.create_shape_matrix(points)
+            shape_matrix, n_class_x, n_class_y = self.parent.shape_matrix_creator.create_shape_matrix(points)
             scale_factor = 0.2  
             
             new_height = int(img.shape[0] * scale_factor)
@@ -882,11 +886,27 @@ class ImagePreprocessing:
 
             for j in range(1, shape_matrix.shape[1]):
                 x_pos = int(j * (new_width / shape_matrix.shape[1]))
-                cv2.line(shape_image, (x_pos, 0), (x_pos, new_height), grid_color, 1)  
+                cv2.line(shape_image, (x_pos, 0), (x_pos, new_height), grid_color, 1)   
+            
+            text_image_height = int(scale_factor*img.shape[0])
+            text_image = np.ones((text_image_height, new_width, 3), dtype=np.uint8) * 200 
+            text = f"({n_class_x}, {n_class_y})"
 
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            font_color = (0, 0, 0)  
+            font_thickness = 2
+
+            (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
+
+            text_x = (new_width - text_width) // 2
+            text_y = (text_image_height + text_height) // 2  
+            cv2.putText(text_image, text, (text_x, text_y), font, font_scale, font_color, font_thickness)
+
+            combined_image = np.vstack((shape_image, text_image))
             empty_column = np.zeros((img.shape[0], new_width, 3), dtype=np.uint8) 
-            empty_column[:new_height, :new_width] = shape_image  
-            black_line = np.zeros((empty_column.shape[0], 5, 3), dtype=np.uint8)  
+            empty_column[:new_height+text_image_height, :new_width] = combined_image  
+            black_line = np.zeros((empty_column.shape[0], 5, 3), dtype=np.uint8) 
 
             visualization = np.hstack((visualization, black_line, empty_column))  
             cv2.imwrite(output_path, visualization)
