@@ -4,12 +4,12 @@ Data_Params:
 
   image_path: 'C:\\Users\\chait\\Desktop\\Anki-auto\\Dataset\\Image\\origin_img\\week_226.png'
 
-Binarization_Params:
-
+ImageSegmentation_Params:
   Utils:
     right_margin_threshold: 30
     left_margin_threshold: 15
-    
+
+ImageAugmentation_Params:
   Make_white_bg:
     low_green: [60, 255, 255]
     high_green: [60, 255, 255]
@@ -37,7 +37,8 @@ Binarization_Params:
       block_size: 11
       c: 2  
 
-SR_Params:
+
+ImageUpscaling_Parms:
   modal: 'binary'       # options: 'green', 'gray', 'gray_gamma', 'gray_equalized', 'binary'
   scale: 8
   sr_method: 'None'    # options: 'CUBIC', 'RealESRGAN', 'None'
