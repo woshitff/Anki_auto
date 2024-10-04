@@ -247,27 +247,34 @@ class ImagePreprocessing:
     def process_segmentation(self):
         cv2.imwrite(f'{self.template_img_dir}/img_clip/origin_img.jpg', self.img)
 
-        green_img, mask = self.segmentation._get_green_regions(self.img)
+        # step 1: 提取文本区域
+        green_img, mask = self.segmentation.extract_text_regions(self.img)
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip'):
             cv2.imwrite(f'{self.template_img_dir}/img_clip/word.jpg', green_img)
 
-        contours = self.segmentation._get_contours(mask)
+        contours = self.segmentation.get_contours(mask)
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/origin_contour'):
             for i, contour in enumerate(contours):
                 self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/contour_{i}.jpg')
                 # print('contour:', contour)
                 # self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
-
-        filtered_contours = self.segmentation._devide_contours(contours)
+        
+        # step 2: 确保每个图像中只有一个词语，非语义手段判断
+        filtered_contours, old_contours, sorted_rows= self.segmentation.split_to_single_words(contours)
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/devided_contour'):
             for i, contour in enumerate(filtered_contours):
                 self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/devided_contour/contour_{i}.jpg')
-        
-        crop_imgs = self.segmentation._crop_img_by_contours(filtered_contours, green_img)
+            for i, contour in enumerate(old_contours):
+                self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/devided_contour/old_contour_{i}.jpg')
+            for i, row in enumerate(sorted_rows):
+                row = row.reshape(-1, 1, 2)
+                self.visual.visualize_and_save_contours(self.img, row, f'{self.template_img_dir}/img_clip/contour/devided_contour/row_{i}.jpg')
+        crop_imgs = self.segmentation.initial_crop_img(filtered_contours, green_img)
 
-        refined_crop_imgs = self.segmentation._refine_crop_img(crop_imgs)
+        # step 3: 对粗处理后的图片进行细化处理
+        refined_crop_imgs = self.segmentation.refine_crop_img(crop_imgs)
         # refined_crop_imgs = [self.segmentation._refine_crop_img(crop_imgs[5])]
-        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/word_crop/refined_img'):
+        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/cropped_img/refined_img'):
             for i, refined_crop_img in enumerate(refined_crop_imgs):
                 cv2.imwrite(f'{self.template_img_dir}/img_clip/word_crop/refined_img/word_{i}_crop_refined.jpg', refined_crop_img)
 
@@ -379,7 +386,9 @@ class ImagePreprocessing:
     class ImageSegmentation:
         def __init__(self, parent_distance):
             self.parent = parent_distance
-
+        # *********************************************
+        # * Step 0: 辅助函数
+        # *********************************************
         def _contour_to_mask(self, contour, img_shape):
             """
             将轮廓转换为掩模
@@ -462,7 +471,7 @@ class ImagePreprocessing:
         # *********************************************
         # * Step 1: 提取文本区域
         # *********************************************
-        def _get_green_regions(self, img):
+        def extract_text_regions(self, img):
             """
             获取图片中包含的绿色区域
 
@@ -492,7 +501,7 @@ class ImagePreprocessing:
 
             return green_img, mask
        
-        def _get_contours(self, 
+        def get_contours(self, 
                       mask: np.ndarray, 
                       ):
             """
@@ -512,32 +521,39 @@ class ImagePreprocessing:
         # *********************************************
         # * Step 2: 确保每个图像中只有一个词语，非语义手段判断
         # *********************************************
-        def __sort_contours(self, contours, line_threshold):
-                contours.sort(key=lambda c: cv2.boundingRect(c)[1])
+        def _sort_contours(self, contours, line_threshold):
+            """
+            对轮廓按照从上到下、从左到右的顺序进行排序
 
-                grouped_contours = []
-                current_group = [contours[0]]  # 初始化第一个分组
-                last_y = cv2.boundingRect(contours[0])[1]
+            Args:
+                contours (list): 轮廓列表 coutours.shape = (N, 1, 2)
+                line_threshold (int): 行的高度阈值
+            """
+            contours.sort(key=lambda c: cv2.boundingRect(c)[1])
 
-                for contour in contours[1:]:
-                    x, y, w, h = cv2.boundingRect(contour)
-                    if abs(y - last_y) < line_threshold:
-                        current_group.append(contour)
-                    else:
-                        grouped_contours.append(current_group)  
-                        current_group = [contour] 
-                    last_y = y
+            grouped_contours = []
+            current_group = [contours[0]]  # 初始化第一个分组
+            last_y = cv2.boundingRect(contours[0])[1]
 
-                if current_group:
-                    grouped_contours.append(current_group)
+            for contour in contours[1:]:
+                x, y, w, h = cv2.boundingRect(contour)
+                if abs(y - last_y) < line_threshold:
+                    current_group.append(contour)
+                else:
+                    grouped_contours.append(current_group)  
+                    current_group = [contour] 
+                last_y = y
 
-                for group in grouped_contours:
-                    group.sort(key=lambda c: cv2.boundingRect(c)[0])
+            if current_group:
+                grouped_contours.append(current_group)
 
-                sorted_contours = [contour for group in grouped_contours for contour in group]
-                return sorted_contours
+            for group in grouped_contours:
+                group.sort(key=lambda c: cv2.boundingRect(c)[0])
+
+            sorted_contours = [contour for group in grouped_contours for contour in group]
+            return sorted_contours
         
-        def __points_enhancer(self, points): 
+        def _points_enhancer(self, points): 
             """
             增强点的数量，使得每行的点数量均衡。
             Args:
@@ -554,66 +570,115 @@ class ImagePreprocessing:
             points = np.vstack([points, rect_points])
             points = points[np.argsort(points[:, 0])]
             
-            return points.tolist()
+            return np.array(points)
 
-        def __generate_line_contours(self, points): 
+        def _split_and_merge_rows(self, points):
+            """
+            将一个轮廓的点按行分组并邻行合并
+
+            Parameters
+            ----------
+            points : numpy.ndarray
+                轮廓的点。形状为 (N, 2) 的数组。
+            
+            Returns
+            -------
+            line_segments : list
+                每行的点组成的list。每个元素是相邻两行的点。形状为 (M, 2) 的数组。
+            """
+            boundary_rows = []
+            current_row = [points[0]]
+            for i in range(1, len(points)):
+                if abs(points[i][1] - points[i-1][1]) < 15:
+                    current_row.append(points[i])
+                else:
+                    boundary_rows.append(current_row)
+                    current_row = [points[i]]
+            boundary_rows.append(current_row)
+            # boundary_rows.type = list[list[np.ndarray]]
+
+            line_segments = []
+            for row1, row2 in zip(boundary_rows[:-1], boundary_rows[1:]):
+                merged_row = row1 + row2  # merged_row.type = list[np.ndarray]
+                merged_row = self._points_enhancer(merged_row)
+                line_segments.append(merged_row)
+
+            return line_segments
+
+        def _group_points_by_col(self, points, threshold=5):
+            """
+            将点按列分组
+
+            Parameters
+            ----------
+            points : numpy.ndarray
+                点的坐标。形状为 (N, 2) 的数组。
+            threshold : int
+                分组的阈值
+
+            Returns
+            -------
+            grouped_points : list
+                按列分组的点。每个元素是一列的点。形状为 (M, 2) 的数组。
+            """
+            grouped_points = []
+            current_group = [points[0]]
+
+            for point in points[1:]:
+                if abs(point[0] - current_group[-1][0]) < threshold:  
+                    current_group.append(point)
+                else:
+                    grouped_points.append(current_group)
+                    current_group = [point]
+            if current_group:
+                grouped_points.append(current_group)
+            
+            return grouped_points
+
+        def _generate_line_contours(self, points): 
             """
             根据给定的点生成文本行的矩形轮廓，进行 x 方向上的分组并根据 y 坐标差异进行过滤。
             
-            Args:
-                points (list or numpy.ndarray): 点列表，形状为(N, 2)
+            Parameters
+            ------------
+            points : np.ndarray
+                点的坐标，形状为 (N, 2) 的数组。
                 
             Returns:
-                filtered_contours (list): 过滤后的矩形轮廓
+            ------------
+            filtered_contours_list (list[np.ndarray]):
+                过滤后的轮廓列表，其中每个轮廓的形状为 (N, 1, 2) 的数组。
             """
             points = np.array(points) if isinstance(points, list) else points
             points = points[np.argsort(points[:, 0])]
             
             # 按 x 坐标分组
-            grouped_points = []
-            current_group = [points[0]]
-            x_threshold = 5  
-            
-            for point in points[1:]:
-                if abs(point[0] - current_group[-1][0]) < x_threshold:  
-                    current_group.append(point)
-                else:
-                    grouped_points.append(current_group)
-                    current_group = [point]
-            
-            if current_group:
-                grouped_points.append(current_group)
+            grouped_points = self._group_points_by_col(points, threshold=5)
+            print('grouped_points:', len(grouped_points))
 
             # 按 y 坐标差异进行过滤
             x, y, w, h = cv2.boundingRect(points)  
-            y_threshold = h * 0.2  
+            y_threshold = h * 0.3
             
-            filtered_points = []
-            for group in grouped_points:
-                y_coords = [p[1] for p in group]  
-                y_diff = max(y_coords) - min(y_coords)  
-                
-                if (h - y_diff) < y_threshold:
-                    filtered_points.append(group)
-            # print('grouped_points', grouped_points)
-            # print('filtered_points', filtered_points)
-            filtered_points_list = []
-            for group in filtered_points:
-                group = np.array(group).reshape(-1, 1, 2).astype(np.int32)  # 转换为 OpenCV 轮廓格式
-                filtered_points_list.append(group)
-            # assert len(filtered_points_list) >= 2, 'filtered_points_list should have at least 2 elements'
-            # print('filtered_points_list', filtered_points_list)
+            filtered_points = [
+                group for group in grouped_points
+                if (h - (max(p[1] for p in group) - min(p[1] for p in group))) < y_threshold
+            ]
 
-            filtered_contours_list = []
-            for points1, points2 in pairwise(filtered_points_list):
-                points = np.concatenate((points1, points2), axis=0)
-                filtered_contours_list.append(points)
+            filtered_points_list = [
+                np.array(group).reshape(-1, 1, 2).astype(np.int32) for group in filtered_points
+            ]
+
+            filtered_contours_list = [
+                np.concatenate((points1, points2), axis=0) for points1, points2 in pairwise(filtered_points_list)
+            ]
+            
             return filtered_contours_list
 
-        def __filter_line_contour(self, contour): 
+        def _filter_line_contour(self, contour): 
             """
             """
-            _, mask = self._get_green_regions(self.parent.img)
+            _, mask = self.extract_text_regions(self.parent.img)
             contour_mask = self._contour_to_mask(contour, mask.shape)
 
             if self._calculate_mask_intersection_and_ratio(contour_mask, mask)[1] < 0.1:
@@ -621,67 +686,50 @@ class ImagePreprocessing:
             else:
                 return contour
 
-        def __devide_per_contour(self, contour): 
+        def _split_per_contour(self, contour): 
             """
             将轮廓分割成多个点并分组,组合成新的轮廓
-            Args:
-                contour (list): numpy.ndarray): 轮廓
-            Returns:
-                new_contour (list): 新的轮廓
+
+            Parameters
+            ------------
+            contour : np.ndarray 
+                轮廓, 形状为 (N, 1, 2)
+
+            Returns
+            ------------
+            new_contour_list (list[np.ndarray]): 
+                新的轮廓列表, 其中每个轮廓形状为 (N, 1, 2)
             """
             # print('contour', contour)
-            points = contour[:, 0, :]
+            points = contour[:, 0, :] # points.type = np.ndarray
             points = sorted(points, key=lambda p: p[1])
-            # points = self.__points_enhancer(points)
-            rows = []
-            current_row = [points[0]]
 
-            for i in range(1, len(points)):
-                if abs(points[i][1] - points[i-1][1]) < 15:
-                    current_row.append(points[i])
-                else:
-                    rows.append(current_row)
-                    current_row = [points[i]]
-            rows.append(current_row)
-            # print('number of rows', len(rows))
-            # print('rows', rows)
+            line_segments = self._split_and_merge_rows(points)
 
-            merged_rows = []
-            for row1, row2 in zip(rows[:-1], rows[1:]):
-                merged_row = row1 + row2
-                merged_row = self.__points_enhancer(merged_row)
-                merged_rows.append(merged_row)
-            # print('merged_rows', merged_rows)
-            # print('merged_rows', merged_rows)
-            new_contours = []
-            for i, rows in enumerate(merged_rows):
-                contours = self.__generate_line_contours(rows)
-                # print(f'contours in row {i}: {contours}')
-                filtered_contours = []
-                for contour in contours:
-                    contour = self.__filter_line_contour(contour)
-                    if contour is not None:
-                        filtered_contours.append(contour)
-                new_contours.append(filtered_contours)
-            
-            new_contours = [c for sublist in new_contours for c in sublist]
-            # print('new_contours', new_contours)
-            return new_contours
+            unfiltered_contours = [] 
+            filtered_contours = []
+            for line_points in line_segments:
+                # rows.type = list[np.ndarray]
+                contours = self._generate_line_contours(line_points) 
+                unfiltered_contours.extend(contours)
+                filtered_contours.extend([c for c in contours if self._filter_line_contour(c) is not None])
+
+            return filtered_contours, unfiltered_contours, line_segments
         
-        def _devide_contours(self, \
+        def split_to_single_words(self, \
                          contours: list \
                         ):
             """
-            将多边形轮廓按行进行分割，并根据行排序（从上到下、从左到右）。
+            将多边形轮廓按行进行分割，并根据行排序（从上到下、从左到右), 最终获得一个个单词, 或者是单词里的字的轮廓
             Args:
                 contours (list): 轮廓列表
-                green_img (numpy.ndarray): 包含绿色区域的图片
+                green_img (numpy.ndarray): 包含绿色区域的图片 
                 left_margin_threshold (int): 左边距阈值
                 right_margin_threshold (int): 右边距阈值
             Returns:
                 new_contours (list): 过滤后的轮廓列表
             Example:
-                >>> contours = [np.array([[[10, 10], [100, 10], [100, 30], [10, 30]]]),
+                >>> contours = [np.array([[[10, 10]], [[100, 10]], [[100, 30]], [[10, 30]]]),
                             np.array([[[20, 20], [100, 20], [100, 100], [20, 100]]])]
                 >>> new_contours = filter_contours_by_height(contours)
                 >>> print(new_contours)
@@ -690,39 +738,46 @@ class ImagePreprocessing:
                         np.array([[[20, 20], [100, 20], [100, 100], [20, 100]]])]
             """
             filtered_contours = []
-            # print('len(contours)', len(contours))
-            # 处理图像纵向分割
+            filtered_contours_old = []
+            merged_rows_points = []
             
-            # h_line = median_height * 1.1
-
             for i, contour in enumerate(contours):
-                new_contour = self.__devide_per_contour(contour)
+                new_contour, old_contour, merged_rows = self._split_per_contour(contour)
                 filtered_contours.append(new_contour)
-            # print('len(filtered_contours)', len(filtered_contours))
+                filtered_contours_old.append(old_contour)
+                merged_rows_points.append(merged_rows)
+            # eg: merged_rows_points = [[np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]])], [np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]])]]
 
             heights = [cv2.boundingRect(c)[3] for c in contours]
             median_height = np.median(heights)
             filtered_contours = [c for sublist in filtered_contours for c in sublist]
-            sorted_contours = self.__sort_contours(filtered_contours, median_height*0.5)
-     
-            return sorted_contours
+            sorted_contours = self._sort_contours(filtered_contours, median_height*0.5)
+
+            filtered_contours_old = [c for sublist in filtered_contours_old for c in sublist]
+            sorted_contours_old = self._sort_contours(filtered_contours_old, median_height*0.5)
+
+            filtered_rows_points = [c for sublist in merged_rows_points for c in sublist]
+            sorted_rows_points = self._sort_contours(filtered_rows_points, median_height*0.5)
+            # eg: filtered_rows_points = [np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]]), np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]])]
+            
+            return sorted_contours, sorted_contours_old, sorted_rows_points
                 
-        def _crop_img_by_contours(self, 
+        def initial_crop_img(self, 
                                contours: list,
                                green_img: np.ndarray):
             """
             根据轮廓获取图片中的文字区域,需要在这里处理换行问题
 
             Args:
-                contours (list): 轮廓列表
+                contours (list[np.ndarray, (N, 1, 2)]): 轮廓列表
                 green_img (numpy.ndarray): 包含绿色区域的图片
             Returns:
                 crop_imgs (list): 文字区域列表
             """
             # 裁剪并合并换行的文字区域        
             crop_imgs = []        
-            if not os.path.exists(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img'):
-                os.makedirs(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img')
+            if not os.path.exists(f'{self.parent.template_img_dir}/img_clip/cropped_img/initial_img'):
+                os.makedirs(f'{self.parent.template_img_dir}/img_clip/cropped_img/initial_img')
             # print('contour', contours)
 
             img_width = self.parent.img.shape[1]
@@ -767,23 +822,23 @@ class ImagePreprocessing:
 
                         crop_img = np.concatenate((crop_img, crop_img_next), axis=1)
                         crop_imgs.append(crop_img)
-                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img/word_{save_index}_crop.jpg', crop_img)
+                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/cropped_img/initial_img/word_{save_index}_crop.jpg', crop_img)
                         save_index += 1
                         skip = True
                     else:
                         crop_imgs.append(crop_img)
-                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img/word_{save_index}_crop.jpg', crop_img)
+                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/cropped_img/initial_img/word_{save_index}_crop.jpg', crop_img)
                         save_index += 1
                 else:
                     crop_imgs.append(crop_img)
-                    cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img/word_{save_index}_crop.jpg', crop_img)
+                    cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/cropped_img/initial_img/word_{save_index}_crop.jpg', crop_img)
                     save_index += 1
             print(f'Number of cropped images: {len(crop_imgs)}')
             return crop_imgs
         # *********************************************
         # * Step 3: 对粗处理后的图片进行细化处理
         # *********************************************
-        def __refine_big_contour(self, contour):
+        def _refine_big_contour(self, contour):
             """
             将大轮廓分割, 保留主要文字的轮廓, 去掉attach的噪声
             Args:
@@ -824,7 +879,7 @@ class ImagePreprocessing:
             filtered_contours = np.array(filtered_points, dtype=np.int32).reshape((-1, 1, 2))
             return filtered_contours
 
-        def _refine_crop_img(self, crop_imgs):
+        def refine_crop_img(self, crop_imgs):
             """
             更精细化的裁剪图片,同时可以去掉下划线等噪声, 避免使用形态学方法导致文字受到干扰
             主要有两种问题：
@@ -838,7 +893,7 @@ class ImagePreprocessing:
             refined_crop_imgs = []
             for i, crop_img in enumerate(crop_imgs):
                 img_area = float(crop_img.shape[0] * crop_img.shape[1])
-                green_img, mask = self._get_green_regions(crop_img)
+                green_img, mask = self.extract_text_regions(crop_img)
 
                 with ensure_directory_exists(f'{self.parent.template_img_dir}/img_clip/mask/refined_mask'):
                     self.parent.visual.visualize_and_save_mask(crop_img, mask, f'{self.parent.template_img_dir}/img_clip/mask/refined_mask/mask_{i}.jpg')
@@ -864,7 +919,7 @@ class ImagePreprocessing:
                     else:
                         pass
                     # condition to filter out attached noises
-                    refined_contour = self.__refine_big_contour(contour)
+                    refined_contour = self._refine_big_contour(contour)
                     x, y, w, h = cv2.boundingRect(refined_contour)
                     cropped_img.append(green_img[y:y+h, x:x+w])
         
