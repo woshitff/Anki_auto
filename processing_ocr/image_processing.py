@@ -255,21 +255,21 @@ class ImagePreprocessing:
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/origin_contour'):
             for i, contour in enumerate(contours):
                 self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/contour_{i}.jpg')
-                print('contour:', contour)
-                self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
+                # print('contour:', contour)
+                # self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
 
         filtered_contours = self.segmentation._devide_contours(contours)
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/devided_contour'):
             for i, contour in enumerate(filtered_contours):
                 self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/devided_contour/contour_{i}.jpg')
         
-        crop_imgs = self.segmentation._crop_imgs_by_contours(filtered_contours, green_img)
+        crop_imgs = self.segmentation._crop_img_by_contours(filtered_contours, green_img)
 
-        refined_crop_imgs = [self.segmentation._refine_crop_img(crop_img) for crop_img in crop_imgs]
+        refined_crop_imgs = self.segmentation._refine_crop_img(crop_imgs)
         # refined_crop_imgs = [self.segmentation._refine_crop_img(crop_imgs[5])]
-        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/word_crop_refined'):
+        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/word_crop/refined_img'):
             for i, refined_crop_img in enumerate(refined_crop_imgs):
-                cv2.imwrite(f'{self.template_img_dir}/img_clip/word_crop_refined/word_{i}_crop_refined.jpg', refined_crop_img)
+                cv2.imwrite(f'{self.template_img_dir}/img_clip/word_crop/refined_img/word_{i}_crop_refined.jpg', refined_crop_img)
 
         print(f'Image segmentation finished. Total number of words: {len(refined_crop_imgs)}')
 
@@ -380,6 +380,52 @@ class ImagePreprocessing:
         def __init__(self, parent_distance):
             self.parent = parent_distance
 
+        def _contour_to_mask(self, contour, img_shape):
+            """
+            将轮廓转换为掩模
+
+            Args:
+                contour (list): 轮廓
+                img_shape (tuple): 图像的形状
+
+            Returns:
+                mask (numpy.ndarray): 掩模
+            """
+            mask = np.zeros(img_shape[:2], dtype=np.uint8)
+            cv2.drawContours(mask, [contour], -1, 255, -1)
+            return mask
+        
+        def _mask_to_contour(self, mask):
+            """
+            将掩模转换为轮廓
+
+            Args:
+                mask (numpy.ndarray): 掩模
+
+            Returns:
+                contour (list): 轮廓
+            """
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            return contours[0]
+
+        def _calculate_mask_intersection_and_ratio(self, mask1, mask2):
+            """
+            计算两个mask的交集, 并返回交集区域在mask1中的比例
+            Args:
+                mask1 (numpy array): 第一个mask (例如 contour_mask)
+                mask2 (numpy array): 第二个mask (例如 _get_green_regions 返回的 mask)
+            Returns:
+                intersection_mask (numpy array): 两个mask的交集
+                ratio (float): 交集区域在mask1中所占的比例
+            """
+            intersection_mask = cv2.bitwise_and(mask1, mask2)
+            intersection_pixels = np.count_nonzero(intersection_mask)
+
+            mask1_pixels = np.count_nonzero(mask1)
+            ratio = intersection_pixels / mask1_pixels if mask1_pixels > 0 else 0
+
+            return intersection_mask, ratio
+        
         def _segment_image_to_lines(self):
             """
             将图片分割成行，并保存每行图片
@@ -491,7 +537,7 @@ class ImagePreprocessing:
                 sorted_contours = [contour for group in grouped_contours for contour in group]
                 return sorted_contours
         
-        def __points_enhancer(self, points):
+        def __points_enhancer(self, points): 
             """
             增强点的数量，使得每行的点数量均衡。
             Args:
@@ -499,9 +545,18 @@ class ImagePreprocessing:
             Returns:
                 new_points (list): 增强后的点列表
             """
-            pass # todo
+            # 先考虑对一行文字的点进行增强
+            points = np.array(points) if isinstance(points, list) else points
+            
+            x, y, w, h = cv2.boundingRect(points)
+            rect_points = np.array([[x, y], [x + w, y], [x, y + h], [x + w, y + h]])
+            
+            points = np.vstack([points, rect_points])
+            points = points[np.argsort(points[:, 0])]
+            
+            return points.tolist()
 
-        def __generate_line_contours(self, points): # todo
+        def __generate_line_contours(self, points): 
             """
             根据给定的点生成文本行的矩形轮廓，进行 x 方向上的分组并根据 y 坐标差异进行过滤。
             
@@ -555,7 +610,18 @@ class ImagePreprocessing:
                 filtered_contours_list.append(points)
             return filtered_contours_list
 
-        def __devide_per_contour(self, contour): # todo
+        def __filter_line_contour(self, contour): 
+            """
+            """
+            _, mask = self._get_green_regions(self.parent.img)
+            contour_mask = self._contour_to_mask(contour, mask.shape)
+
+            if self._calculate_mask_intersection_and_ratio(contour_mask, mask)[1] < 0.1:
+                return None
+            else:
+                return contour
+
+        def __devide_per_contour(self, contour): 
             """
             将轮廓分割成多个点并分组,组合成新的轮廓
             Args:
@@ -583,6 +649,7 @@ class ImagePreprocessing:
             merged_rows = []
             for row1, row2 in zip(rows[:-1], rows[1:]):
                 merged_row = row1 + row2
+                merged_row = self.__points_enhancer(merged_row)
                 merged_rows.append(merged_row)
             # print('merged_rows', merged_rows)
             # print('merged_rows', merged_rows)
@@ -590,7 +657,12 @@ class ImagePreprocessing:
             for i, rows in enumerate(merged_rows):
                 contours = self.__generate_line_contours(rows)
                 # print(f'contours in row {i}: {contours}')
-                new_contours.append(contours)
+                filtered_contours = []
+                for contour in contours:
+                    contour = self.__filter_line_contour(contour)
+                    if contour is not None:
+                        filtered_contours.append(contour)
+                new_contours.append(filtered_contours)
             
             new_contours = [c for sublist in new_contours for c in sublist]
             # print('new_contours', new_contours)
@@ -620,8 +692,7 @@ class ImagePreprocessing:
             filtered_contours = []
             # print('len(contours)', len(contours))
             # 处理图像纵向分割
-            heights = [cv2.boundingRect(c)[3] for c in contours]
-            median_height = np.median(heights)
+            
             # h_line = median_height * 1.1
 
             for i, contour in enumerate(contours):
@@ -629,12 +700,14 @@ class ImagePreprocessing:
                 filtered_contours.append(new_contour)
             # print('len(filtered_contours)', len(filtered_contours))
 
+            heights = [cv2.boundingRect(c)[3] for c in contours]
+            median_height = np.median(heights)
             filtered_contours = [c for sublist in filtered_contours for c in sublist]
             sorted_contours = self.__sort_contours(filtered_contours, median_height*0.5)
      
             return sorted_contours
                 
-        def _crop_imgs_by_contours(self, 
+        def _crop_img_by_contours(self, 
                                contours: list,
                                green_img: np.ndarray):
             """
@@ -648,14 +721,14 @@ class ImagePreprocessing:
             """
             # 裁剪并合并换行的文字区域        
             crop_imgs = []        
-            if not os.path.exists(f'{self.parent.template_img_dir}/img_clip/word_crop'):
-                os.makedirs(f'{self.parent.template_img_dir}/img_clip/word_crop')
+            if not os.path.exists(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img'):
+                os.makedirs(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img')
             # print('contour', contours)
 
             img_width = self.parent.img.shape[1]
             save_index = 0
             skip = False
-            black_threshold = 0.2
+            # black_threshold = 0.2
 
             for i, contour in enumerate(contours): 
                 if skip:
@@ -664,13 +737,13 @@ class ImagePreprocessing:
                     continue
                 x, y, w, h = cv2.boundingRect(contour)
                 crop_img = green_img[y:y+h, x:x+w]  
-                # 过滤掉黑色区域
-                non_zero_pixels = np.count_nonzero(crop_img)
-                total_pixels = crop_img.size
-                non_zero_ratio = non_zero_pixels / total_pixels
-                if non_zero_ratio < black_threshold:
-                    print(f'Skipping contour {i}, non_zero_ratio: {non_zero_ratio}')
-                    continue
+                # # 过滤掉黑色区域
+                # non_zero_pixels = np.count_nonzero(crop_img)
+                # total_pixels = crop_img.size
+                # non_zero_ratio = non_zero_pixels / total_pixels
+                # if non_zero_ratio < black_threshold:
+                #     print(f'Skipping contour {i}, non_zero_ratio: {non_zero_ratio}')
+                #     continue
 
                 right_margin_threshold =  img_width * 0.04  # 使用图像宽度的 4% 作为右边距阈值
                 left_margin_threshold =  img_width * 0.025
@@ -694,17 +767,18 @@ class ImagePreprocessing:
 
                         crop_img = np.concatenate((crop_img, crop_img_next), axis=1)
                         crop_imgs.append(crop_img)
-                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/word_{save_index}_crop.jpg', crop_img)
+                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img/word_{save_index}_crop.jpg', crop_img)
                         save_index += 1
                         skip = True
                     else:
                         crop_imgs.append(crop_img)
-                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/word_{save_index}_crop.jpg', crop_img)
+                        cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img/word_{save_index}_crop.jpg', crop_img)
                         save_index += 1
                 else:
                     crop_imgs.append(crop_img)
-                    cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/word_{save_index}_crop.jpg', crop_img)
+                    cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/word_crop/initial_img/word_{save_index}_crop.jpg', crop_img)
                     save_index += 1
+            print(f'Number of cropped images: {len(crop_imgs)}')
             return crop_imgs
         # *********************************************
         # * Step 3: 对粗处理后的图片进行细化处理
@@ -750,7 +824,7 @@ class ImagePreprocessing:
             filtered_contours = np.array(filtered_points, dtype=np.int32).reshape((-1, 1, 2))
             return filtered_contours
 
-        def _refine_crop_img(self, crop_img):
+        def _refine_crop_img(self, crop_imgs):
             """
             更精细化的裁剪图片,同时可以去掉下划线等噪声, 避免使用形态学方法导致文字受到干扰
             主要有两种问题：
@@ -761,47 +835,51 @@ class ImagePreprocessing:
             Returns:
                 refined_crop_img (numpy.ndarray): 裁剪后的图片
             """
-            img_area = float(crop_img.shape[0] * crop_img.shape[1])
+            refined_crop_imgs = []
+            for i, crop_img in enumerate(crop_imgs):
+                img_area = float(crop_img.shape[0] * crop_img.shape[1])
+                green_img, mask = self._get_green_regions(crop_img)
 
-            green_img, mask = self._get_green_regions(crop_img)
-
-            self.parent.visual.visualize_and_save_mask(crop_img, mask, f'{self.parent.template_img_dir}/img_clip/mask.jpg')
-            self.parent.visual.visualize_and_save_mask(np.ones_like(crop_img, dtype=np.uint8)*255, mask, f'{self.parent.template_img_dir}/img_clip/mask_white.jpg')
-    
-            contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-            contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
-            # print(contours)
-            self.parent.visual.visualize_and_save_contours(crop_img, contours, f'{self.parent.template_img_dir}/img_clip/contours.jpg')
-            self.parent.visual.visualize_and_save_contours(np.ones_like(crop_img, dtype=np.uint8)*255, contours, f'{self.parent.template_img_dir}/img_clip/contours_white.jpg')
-
-            cropped_img = []
-            for i, contour in enumerate(contours):
-                x, y, w, h = cv2.boundingRect(contour)
-                contour_wh_ratio = float(w) / float(h)
-                contour_area = cv2.contourArea(contour)
-                # condition to filter out detached noises
-                if h > 0 and contour_wh_ratio > 10 or contour_area/img_area < 0.07:
-                    continue
-                elif h == 0:
-                    print(f'Contour {i} has zero height, skipping')
-                else:
-                    pass
-                # condition to filter out attached noises
-                refined_contour = self.__refine_big_contour(contour)
-                x, y, w, h = cv2.boundingRect(refined_contour)
-                cropped_img.append(green_img[y:y+h, x:x+w])
-    
-            max_height = max(img.shape[0] for img in cropped_img)
-            resized_images = []
-            for img in cropped_img:
-                height, width = img.shape[:2]
-                resized_img = cv2.resize(img, (width, max_height))
-                resized_images.append(resized_img)
-            # print(f'Number of resized images: {len(resized_images)}')
-            # print(f'Shape of resized_images: {resized_images[0].shape}, {resized_images[-1].shape}')
-            refined_crop_img = cv2.hconcat(resized_images)
-            # print(f'Shape of refined_crop_img: {refined_crop_img.shape}')
-            return refined_crop_img
+                with ensure_directory_exists(f'{self.parent.template_img_dir}/img_clip/mask/refined_mask'):
+                    self.parent.visual.visualize_and_save_mask(crop_img, mask, f'{self.parent.template_img_dir}/img_clip/mask/refined_mask/mask_{i}.jpg')
+                    self.parent.visual.visualize_and_save_mask(np.ones_like(crop_img, dtype=np.uint8)*255, mask, f'{self.parent.template_img_dir}/img_clip/mask/refined_mask/mask_white_{i}.jpg')
+        
+                contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+                contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+                # print(contours)
+                with ensure_directory_exists(f'{self.parent.template_img_dir}/img_clip/contour/refined_contour'):
+                    self.parent.visual.visualize_and_save_contours(crop_img, contours, f'{self.parent.template_img_dir}/img_clip/contour/refined_contour/contours_{i}.jpg')
+                    self.parent.visual.visualize_and_save_contours(np.ones_like(crop_img, dtype=np.uint8)*255, contours, f'{self.parent.template_img_dir}/img_clip/contour/refined_contour/contours_white_{i}.jpg')
+                
+                cropped_img = []
+                for i, contour in enumerate(contours):
+                    x, y, w, h = cv2.boundingRect(contour)
+                    contour_wh_ratio = float(w) / float(h)
+                    contour_area = cv2.contourArea(contour)
+                    # condition to filter out detached noises
+                    if h > 0 and contour_wh_ratio > 10 or contour_area/img_area < 0.07:
+                        continue
+                    elif h == 0:
+                        print(f'Contour {i} has zero height, skipping')
+                    else:
+                        pass
+                    # condition to filter out attached noises
+                    refined_contour = self.__refine_big_contour(contour)
+                    x, y, w, h = cv2.boundingRect(refined_contour)
+                    cropped_img.append(green_img[y:y+h, x:x+w])
+        
+                max_height = max(img.shape[0] for img in cropped_img)
+                resized_images = []
+                for img in cropped_img:
+                    height, width = img.shape[:2]
+                    resized_img = cv2.resize(img, (width, max_height))
+                    resized_images.append(resized_img)
+                # print(f'Number of resized images: {len(resized_images)}')
+                # print(f'Shape of resized_images: {resized_images[0].shape}, {resized_images[-1].shape}')
+                refined_crop_img = cv2.hconcat(resized_images)
+                # print(f'Shape of refined_crop_img: {refined_crop_img.shape}')
+                refined_crop_imgs.append(refined_crop_img)
+            return refined_crop_imgs
                 
     class ImageAugmentation:
         def __init__(self, parent_distance):
