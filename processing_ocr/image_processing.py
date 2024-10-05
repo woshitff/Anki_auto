@@ -260,15 +260,15 @@ class ImagePreprocessing:
                 # self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
         
         # step 2: 确保每个图像中只有一个词语，非语义手段判断
-        filtered_contours, old_contours, sorted_rows= self.segmentation.split_to_single_words(contours)
-        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/devided_contour'):
+        filtered_contours, unfiltered_contours, sorted_rows= self.segmentation.split_to_single_words(contours)
+        with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/initial_contour'):
             for i, contour in enumerate(filtered_contours):
-                self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/devided_contour/contour_{i}.jpg')
-            for i, contour in enumerate(old_contours):
-                self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/devided_contour/old_contour_{i}.jpg')
+                self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/initial_contour/filtered_contour_{i}.jpg')
+            for i, contour in enumerate(unfiltered_contours):
+                self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/initial_contour/unfiltered_contour_{i}.jpg')
             for i, row in enumerate(sorted_rows):
                 row = row.reshape(-1, 1, 2)
-                self.visual.visualize_and_save_contours(self.img, row, f'{self.template_img_dir}/img_clip/contour/devided_contour/row_{i}.jpg')
+                self.visual.visualize_and_save_contours(self.img, row, f'{self.template_img_dir}/img_clip/contour/initial_contour/sorted_row_{i}.jpg')
         crop_imgs = self.segmentation.initial_crop_img(filtered_contours, green_img)
 
         # step 3: 对粗处理后的图片进行细化处理
@@ -568,7 +568,6 @@ class ImagePreprocessing:
             rect_points = np.array([[x, y], [x + w, y], [x, y + h], [x + w, y + h]])
             
             points = np.vstack([points, rect_points])
-            points = points[np.argsort(points[:, 0])]
             
             return np.array(points)
 
@@ -583,11 +582,12 @@ class ImagePreprocessing:
             
             Returns
             -------
-            line_segments : list
-                每行的点组成的list。每个元素是相邻两行的点。形状为 (M, 2) 的数组。
+            line_segments : list[(np.ndarray, np.ndarray)]
+                每行的点组成的list。每个元素是一个元组 (points, label)，其中 points 形状为 (M, 2) 的数组, label 是点的行标签(M,1)
             """
             boundary_rows = []
             current_row = [points[0]]
+            
             for i in range(1, len(points)):
                 if abs(points[i][1] - points[i-1][1]) < 15:
                     current_row.append(points[i])
@@ -595,13 +595,23 @@ class ImagePreprocessing:
                     boundary_rows.append(current_row)
                     current_row = [points[i]]
             boundary_rows.append(current_row)
-            # boundary_rows.type = list[list[np.ndarray]]
 
             line_segments = []
-            for row1, row2 in zip(boundary_rows[:-1], boundary_rows[1:]):
-                merged_row = row1 + row2  # merged_row.type = list[np.ndarray]
+            for idx, (row1, row2) in enumerate(zip(boundary_rows[:-1], boundary_rows[1:])):
+                merged_row = row1 + row2  
+                labels_merged = [idx] * len(row1) + [idx + 1] * len(row2)
+
                 merged_row = self._points_enhancer(merged_row)
-                line_segments.append(merged_row)
+
+                addition_points_count = len(merged_row) - len(labels_merged)
+                if addition_points_count > 0:
+                    row1_mean_y = np.mean([p[1] for p in row1])
+                    row2_mean_y = np.mean([p[1] for p in row2])
+                    for point in merged_row[-addition_points_count:]:
+                        closet_label = idx if abs(point[1] - row1_mean_y) < abs(point[1] - row2_mean_y) else (idx + 1)
+                        labels_merged.append(closet_label)
+
+                line_segments.append((merged_row, np.array(labels_merged)))
 
             return line_segments
 
@@ -635,7 +645,7 @@ class ImagePreprocessing:
             
             return grouped_points
 
-        def _generate_line_contours(self, points): 
+        def _generate_line_contours(self, points, line_labels): 
             """
             根据给定的点生成文本行的矩形轮廓，进行 x 方向上的分组并根据 y 坐标差异进行过滤。
             
@@ -643,6 +653,8 @@ class ImagePreprocessing:
             ------------
             points : np.ndarray
                 点的坐标，形状为 (N, 2) 的数组。
+            line_labels : np.ndarray
+                点的行标签，形状为 (N, 1) 的数组
                 
             Returns:
             ------------
@@ -650,25 +662,25 @@ class ImagePreprocessing:
                 过滤后的轮廓列表，其中每个轮廓的形状为 (N, 1, 2) 的数组。
             """
             points = np.array(points) if isinstance(points, list) else points
-            points = points[np.argsort(points[:, 0])]
-            
+            line_labels = np.array(line_labels) if isinstance(line_labels, list) else line_labels
+
+            sorted_indices = np.argsort(points[:, 0])
+            points = points[sorted_indices]
+            line_labels = line_labels[sorted_indices]
+
             # 按 x 坐标分组
             grouped_points = self._group_points_by_col(points, threshold=5)
-            print('grouped_points:', len(grouped_points))
-
-            # 按 y 坐标差异进行过滤
-            x, y, w, h = cv2.boundingRect(points)  
-            y_threshold = h * 0.3
-            
+            points_to_labels = {tuple(p): label for p, label in zip(points, line_labels)}
+            grouped_labels = [[points_to_labels.get(tuple(g)) for g in group] for group in grouped_points]
+        
+            # 按 y 坐标差异进行过滤, 这里过滤是为了去除每一行非边界的点
             filtered_points = [
-                group for group in grouped_points
-                if (h - (max(p[1] for p in group) - min(p[1] for p in group))) < y_threshold
+                group for group, labels in zip(grouped_points, grouped_labels) if len(np.unique(labels)) == 2
             ]
 
             filtered_points_list = [
                 np.array(group).reshape(-1, 1, 2).astype(np.int32) for group in filtered_points
             ]
-
             filtered_contours_list = [
                 np.concatenate((points1, points2), axis=0) for points1, points2 in pairwise(filtered_points_list)
             ]
@@ -708,9 +720,8 @@ class ImagePreprocessing:
 
             unfiltered_contours = [] 
             filtered_contours = []
-            for line_points in line_segments:
-                # rows.type = list[np.ndarray]
-                contours = self._generate_line_contours(line_points) 
+            for line_points, line_labels in line_segments:
+                contours = self._generate_line_contours(line_points, line_labels) 
                 unfiltered_contours.extend(contours)
                 filtered_contours.extend([c for c in contours if self._filter_line_contour(c) is not None])
 
@@ -742,7 +753,8 @@ class ImagePreprocessing:
             merged_rows_points = []
             
             for i, contour in enumerate(contours):
-                new_contour, old_contour, merged_rows = self._split_per_contour(contour)
+                new_contour, old_contour, line_segments = self._split_per_contour(contour)
+                merged_rows = [line for line, _ in line_segments]
                 filtered_contours.append(new_contour)
                 filtered_contours_old.append(old_contour)
                 merged_rows_points.append(merged_rows)
