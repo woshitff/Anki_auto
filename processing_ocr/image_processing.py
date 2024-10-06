@@ -10,7 +10,7 @@ import numpy as np
 from sklearn.cluster import KMeans
 from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.metrics import silhouette_score
-from itertools import pairwise
+from itertools import pairwise, combinations
 import cv2
 
 # from realesrgan import RealESRGAN
@@ -260,7 +260,9 @@ class ImagePreprocessing:
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/origin_contour'):
             for i, contour in enumerate(contours):
                 self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/contour_{i}.jpg')
-                
+
+        logging.info(f"Step 1 finished. Number of contours: {len(contours)}")
+
         logging.info("")
         logging.info("*********************************************")
         logging.info("* Step 2: ensure only one word in each image")
@@ -398,8 +400,8 @@ class ImagePreprocessing:
         return input_dir, output_dir
 
     class ImageSegmentation:
-        def __init__(self, parent_distance):
-            self.parent = parent_distance
+        def __init__(self, parent_instance):
+            self.parent = parent_instance
         # *********************************************
         # * Step 0: 辅助函数
         # *********************************************
@@ -798,7 +800,7 @@ class ImagePreprocessing:
                 contours (list[np.ndarray, (N, 1, 2)]): 轮廓列表
                 green_img (numpy.ndarray): 包含绿色区域的图片
             Returns:
-                crop_imgs (list): 文字区域列表
+                crop_imgs (list[numpy.ndarray]): 文字区域图片列表
             """
             # 裁剪并合并换行的文字区域        
             crop_imgs = []        
@@ -863,46 +865,175 @@ class ImagePreprocessing:
         # *********************************************
         # * Step 3: 对粗处理后的图片进行细化处理
         # *********************************************
-        def _refine_big_contour(self, contour):
+        def _remove_unattached_noise(self, contour, img_area):
             """
-            将大轮廓分割, 保留主要文字的轮廓, 去掉attach的噪声
+            去掉非主轮廓的噪声, 通过判断轮廓的面积和宽高比来过滤噪声轮廓
+
             Args:
-                contour (numpy.ndarray): 轮廓
+                contour (numpy.ndarray): 
+                    轮廓, 形状为 (N, 1, 2)
+                img_area (float): 
+                    图片面积
+            Returns:
+                bool: 
+                    True: 保留该轮廓, False: 去掉该轮廓
+            """
+            x, y, w, h = cv2.boundingRect(contour)
+            contour_wh_ratio = float(w) / float(h)
+            contour_area = cv2.contourArea(contour)
+
+            # condition to filter out detached noises
+            if h > 0 and contour_wh_ratio > 10 or contour_area / img_area < 0.07:
+                return False
+            elif h == 0:
+                print(f'Contour has zero height, skipping')
+                return False
+            else:
+                return True
+                
+        def _is_approx_rectangle(self, pts, tolerance=0.05):
+            """
+            检查四个点是否可以构成近似矩形
+            Args:
+                pts (numpy.ndarray): 
+                    四个点的坐标
+                tolerance (float): 
+                    容许误差比例, 默认为0.1
+            Returns:
+                bool: 
+                    如果是近似矩形返回True, 否则返回False
+            """
+            # pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
+
+            def relative_error(a, b, tolerance):
+                return abs(a - b) / max(a, b) < tolerance
+
+            distances = []
+            for i in range(4):
+                for j in range(i + 1, 4):
+                    dist = np.linalg.norm(pts[i] - pts[j])
+                    distances.append((dist, i, j))
+
+            distances.sort(key=lambda x: x[0])
+
+            edge1, edge2, edge3, edge4 = distances[0][0], distances[1][0], distances[2][0], distances[3][0]
+            diag1, diag2 = distances[4][0], distances[5][0]
+
+            diag_similar = relative_error(diag1, diag2, tolerance)
+            edges_similar = relative_error(edge1, edge2, tolerance) and relative_error(edge3, edge4, tolerance)
+            print(f'diag_similar: {diag_similar}, edges_similar: {edges_similar}')
+            return diag_similar and edges_similar
+
+        def _remove_attached_noise(self, contour):
+            """
+            细化大轮廓, 保留主要文字的轮廓, 去掉attach的噪声
+            Args:
+                contour (numpy.ndarray): 
+                    轮廓, 形状为 (N, 1, 2)
                 img (numpy.ndarray): 图片
             Returns:
-                contours (list of np.ndarray): 矩形轮廓列表
-            """        
-            points = contour[:, 0, :]
-            points = points[np.argsort(points[:, 0])]
+                filtered_contour (numpy.ndarray): 
+                    过滤后的矩形轮廓, 形状为 (4, 1, 2)
+            """ 
+            hull = cv2.convexHull(contour)
+            points = hull[:, 0, :]
+            print(f'hull points: {points}')
+            max_area = 0
+            largest_rect = None
 
-            grouped_points = []
-            current_group = [points[0]]
-
-            x_threshold = 3 
-            for point in points[1:]:
-                if abs(point[0] - current_group[-1][0]) < x_threshold:
-                    current_group.append(point)
+            for pts_comb in combinations(points, 4):
+                if self._is_approx_rectangle(np.array(pts_comb)):
+                    rect = cv2.minAreaRect(np.array(pts_comb))
+                    width, height = rect[1]
+                    area = width * height
+                    print(f'area: {area}')
+                    if area > max_area:
+                        max_area, largest_rect = area, np.array(pts_comb)
                 else:
-                    grouped_points.append(current_group)
-                    current_group = [point]
-            if current_group:
-                grouped_points.append(current_group)
-            
-            x, y, w, h = cv2.boundingRect(contour)
-            y_threshold = h*0.2
-            filtered_points = []
-            for group in grouped_points:
-                y_coords = [p[1] for p in group]
-                y_diff = max(y_coords) - min(y_coords)
-                if (h-y_diff) < y_threshold:
-                    filtered_points.append(group)
-            if len(grouped_points) > 1:
-                filtered_points = [filtered_points[0], filtered_points[-1]]
-            assert len(filtered_points) == 2, print(f'Contour has more than one rectangle')
+                    print(f'Not a rectangle: {pts_comb}')
+            print(f'max_area: {max_area}')
+            if largest_rect is None:
+                print(f'Failed to find largest rectangle for contour {contour}')
+            return largest_rect.reshape((-1, 1, 2)) if largest_rect is not None else contour
+        
+        # def _remove_attached_noise(self, contour):
+        #     """
+        #     将大轮廓分割, 保留主要文字的轮廓, 去掉attach的噪声
+        #     Args:
+        #         contour (numpy.ndarray): 
+        #             轮廓, 形状为 (N, 1, 2)
+        #         img (numpy.ndarray): 图片
+        #     Returns:
+        #         filtered_contour (numpy.ndarray): 
+        #             过滤后的轮廓, 形状为 (N, 1, 2)
+        #     """        
+        #     points = contour[:, 0, :]
+        #     points = points[np.argsort(points[:, 0])]
 
-            filtered_points = np.vstack(filtered_points)
-            filtered_contours = np.array(filtered_points, dtype=np.int32).reshape((-1, 1, 2))
-            return filtered_contours
+        #     grouped_points = []
+        #     current_group = [points[0]]
+
+        #     x_threshold = 3 
+        #     for point in points[1:]:
+        #         if abs(point[0] - current_group[-1][0]) < x_threshold:
+        #             current_group.append(point)
+        #         else:
+        #             grouped_points.append(current_group)
+        #             current_group = [point]
+        #     if current_group:
+        #         grouped_points.append(current_group)
+            
+        #     x, y, w, h = cv2.boundingRect(contour)
+        #     y_threshold = h*0.2
+        #     filtered_points = []
+        #     for group in grouped_points:
+        #         y_coords = [p[1] for p in group]
+        #         y_diff = max(y_coords) - min(y_coords)
+        #         if (h-y_diff) < y_threshold:
+        #             filtered_points.append(group)
+        #     print(f'len of Filtered points: {len(filtered_points)}')
+        #     if len(grouped_points) > 1:
+        #         filtered_points = [filtered_points[0], filtered_points[-1]]
+        #     assert len(filtered_points) == 2, print(f'Contour has more than one rectangle')
+
+        #     filtered_points = np.vstack(filtered_points)
+        #     filtered_contour = np.array(filtered_points, dtype=np.int32).reshape((-1, 1, 2))
+
+        #     return filtered_contour
+        
+        def _clean_and_crop_img(self, contours, crop_img, green_img):
+            """
+            过滤噪声并裁剪图片
+            """
+            img_area = float(crop_img.shape[0] * crop_img.shape[1])
+            cleaned_regions = []
+            for i, contour in enumerate(contours):
+                # condition to filter out unattached noises
+                if not self._remove_unattached_noise(contour, img_area):
+                    continue
+
+                # condition to filter out attached noises
+                refined_contour = self._remove_attached_noise(contour)
+                x, y, w, h = cv2.boundingRect(refined_contour)
+                cleaned_regions.append(green_img[y:y + h, x:x + w])
+            
+            return cleaned_regions
+
+        def _resize_and_concat(self, cropped_img):
+            """
+            统一调整图片高度并拼接
+            """
+            if not cropped_img:
+                return np.array([])
+
+            max_height = max(img.shape[0] for img in cropped_img)
+            resized_images = []
+            for img in cropped_img:
+                height, width = img.shape[:2]
+                resized_img = cv2.resize(img, (width, max_height))
+                resized_images.append(resized_img)
+
+            return cv2.hconcat(resized_images)
 
         def refine_crop_img(self, crop_imgs):
             """
@@ -911,55 +1042,31 @@ class ImagePreprocessing:
                 1. 噪声在主轮廓内
                 2. 噪声在主轮廓外
             Args:
-                crop_img (numpy.ndarray): 待裁剪图片
+                crop_img (list[numpy.ndarray]): 待裁剪图片列表
             Returns:
-                refined_crop_img (numpy.ndarray): 裁剪后的图片
+                refined_crop_img (list[numpy.ndarray]): 裁剪后的图片列表
             """
-            refined_crop_imgs = []
+            refined_imgs = []
             for i, crop_img in enumerate(crop_imgs):
-                img_area = float(crop_img.shape[0] * crop_img.shape[1])
+                print(f'Refining word_{i}')
                 green_img, mask = self.extract_text_regions(crop_img)
-
                 with ensure_directory_exists(f'{self.parent.template_img_dir}/img_clip/mask/refined_mask'):
                     self.parent.visual.visualize_and_save_mask(crop_img, mask, f'{self.parent.template_img_dir}/img_clip/mask/refined_mask/mask_{i}.jpg')
                     self.parent.visual.visualize_and_save_mask(np.ones_like(crop_img, dtype=np.uint8)*255, mask, f'{self.parent.template_img_dir}/img_clip/mask/refined_mask/mask_white_{i}.jpg')
         
                 contours = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
                 contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
-                # print(contours)
+                print(f'Contours of word_{i}: {contours}')
                 with ensure_directory_exists(f'{self.parent.template_img_dir}/img_clip/contour/refined_contour'):
                     self.parent.visual.visualize_and_save_contours(crop_img, contours, f'{self.parent.template_img_dir}/img_clip/contour/refined_contour/contours_{i}.jpg')
                     self.parent.visual.visualize_and_save_contours(np.ones_like(crop_img, dtype=np.uint8)*255, contours, f'{self.parent.template_img_dir}/img_clip/contour/refined_contour/contours_white_{i}.jpg')
                 
-                cropped_img = []
-                for i, contour in enumerate(contours):
-                    x, y, w, h = cv2.boundingRect(contour)
-                    contour_wh_ratio = float(w) / float(h)
-                    contour_area = cv2.contourArea(contour)
-                    # condition to filter out detached noises
-                    if h > 0 and contour_wh_ratio > 10 or contour_area/img_area < 0.07:
-                        continue
-                    elif h == 0:
-                        print(f'Contour {i} has zero height, skipping')
-                    else:
-                        pass
-                    # condition to filter out attached noises
-                    refined_contour = self._refine_big_contour(contour)
-                    x, y, w, h = cv2.boundingRect(refined_contour)
-                    cropped_img.append(green_img[y:y+h, x:x+w])
-        
-                max_height = max(img.shape[0] for img in cropped_img)
-                resized_images = []
-                for img in cropped_img:
-                    height, width = img.shape[:2]
-                    resized_img = cv2.resize(img, (width, max_height))
-                    resized_images.append(resized_img)
-                # print(f'Number of resized images: {len(resized_images)}')
-                # print(f'Shape of resized_images: {resized_images[0].shape}, {resized_images[-1].shape}')
-                refined_crop_img = cv2.hconcat(resized_images)
-                # print(f'Shape of refined_crop_img: {refined_crop_img.shape}')
-                refined_crop_imgs.append(refined_crop_img)
-            return refined_crop_imgs
+                cleaned_img = self._clean_and_crop_img(contours, crop_img, green_img)
+                refined_img = self._resize_and_concat(cleaned_img)
+
+                refined_imgs.append(refined_img)
+                
+            return refined_imgs
                 
     class ImageAugmentation:
         def __init__(self, parent_distance):
