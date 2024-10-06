@@ -4,6 +4,7 @@ from typing import Sequence
 from contextlib import contextmanager
 import functools   
 import time
+import logging
 
 import numpy as np
 from sklearn.cluster import KMeans
@@ -62,11 +63,11 @@ def log_function_call(func):
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        print(f"\n========== Start {func.__name__} ==========")
+        print(f"\n============ Start {func.__name__} ============")
         start_time = time.time()
         result = func(*args, **kwargs)
         end_time = time.time()
-        print(f"========== End {func.__name__} ==========")
+        print(f"============ End {func.__name__} ============")
         print(f"Executed in: {end_time - start_time:.4f} seconds\n")
         return result
     return wrapper
@@ -247,7 +248,10 @@ class ImagePreprocessing:
     def process_segmentation(self):
         cv2.imwrite(f'{self.template_img_dir}/img_clip/origin_img.jpg', self.img)
 
-        # step 1: 提取文本区域
+        logging.info("*********************************************")
+        logging.info("* Step 1: extract text regions")
+        logging.info("*********************************************")
+
         green_img, mask = self.segmentation.extract_text_regions(self.img)
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip'):
             cv2.imwrite(f'{self.template_img_dir}/img_clip/word.jpg', green_img)
@@ -256,10 +260,12 @@ class ImagePreprocessing:
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/origin_contour'):
             for i, contour in enumerate(contours):
                 self.visual.visualize_and_save_contours(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/contour_{i}.jpg')
-                # print('contour:', contour)
-                # self.visual.visualize_and_save_shapematrix(self.img, contour, f'{self.template_img_dir}/img_clip/contour/origin_contour/shape_matrix_{i}.jpg')
-        
-        # step 2: 确保每个图像中只有一个词语，非语义手段判断
+                
+        logging.info("")
+        logging.info("*********************************************")
+        logging.info("* Step 2: ensure only one word in each image")
+        logging.info("*********************************************")
+
         filtered_contours, unfiltered_contours, sorted_rows= self.segmentation.split_to_single_words(contours)
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/contour/initial_contour'):
             for i, contour in enumerate(filtered_contours):
@@ -271,15 +277,23 @@ class ImagePreprocessing:
                 self.visual.visualize_and_save_contours(self.img, row, f'{self.template_img_dir}/img_clip/contour/initial_contour/sorted_row_{i}.jpg')
         crop_imgs = self.segmentation.initial_crop_img(filtered_contours, green_img)
 
-        # step 3: 对粗处理后的图片进行细化处理
+        logging.info(f'Step 2 finished. Number of cropped images: {len(crop_imgs)}')
+        logging.info("")
+
+        logging.info("")
+        logging.info("*********************************************")
+        logging.info("* Step 3: refine cropped images")
+        logging.info("*********************************************")
+
         refined_crop_imgs = self.segmentation.refine_crop_img(crop_imgs)
         # refined_crop_imgs = [self.segmentation._refine_crop_img(crop_imgs[5])]
         with ensure_directory_exists(f'{self.template_img_dir}/img_clip/cropped_img/refined_img'):
             for i, refined_crop_img in enumerate(refined_crop_imgs):
-                cv2.imwrite(f'{self.template_img_dir}/img_clip/word_crop/refined_img/word_{i}_crop_refined.jpg', refined_crop_img)
+                cv2.imwrite(f'{self.template_img_dir}/img_clip/cropped_img/refined_img/word_{i}_crop_refined.jpg', refined_crop_img)
 
         print(f'Image segmentation finished. Total number of words: {len(refined_crop_imgs)}')
-
+        logging.info("")
+        
         return refined_crop_imgs
 
     @log_function_call
@@ -749,30 +763,30 @@ class ImagePreprocessing:
                         np.array([[[20, 20], [100, 20], [100, 100], [20, 100]]])]
             """
             filtered_contours = []
-            filtered_contours_old = []
+            unfiltered_contours = []
             merged_rows_points = []
             
             for i, contour in enumerate(contours):
                 new_contour, old_contour, line_segments = self._split_per_contour(contour)
                 merged_rows = [line for line, _ in line_segments]
                 filtered_contours.append(new_contour)
-                filtered_contours_old.append(old_contour)
+                unfiltered_contours.append(old_contour)
                 merged_rows_points.append(merged_rows)
             # eg: merged_rows_points = [[np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]])], [np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]])]]
 
             heights = [cv2.boundingRect(c)[3] for c in contours]
             median_height = np.median(heights)
             filtered_contours = [c for sublist in filtered_contours for c in sublist]
-            sorted_contours = self._sort_contours(filtered_contours, median_height*0.5)
+            sorted_filtered_contours = self._sort_contours(filtered_contours, median_height*0.5)
 
-            filtered_contours_old = [c for sublist in filtered_contours_old for c in sublist]
-            sorted_contours_old = self._sort_contours(filtered_contours_old, median_height*0.5)
+            unfiltered_contours = [c for sublist in unfiltered_contours for c in sublist]
+            sorted_unfiltered_contours = self._sort_contours(unfiltered_contours, median_height*0.5)
 
             filtered_rows_points = [c for sublist in merged_rows_points for c in sublist]
             sorted_rows_points = self._sort_contours(filtered_rows_points, median_height*0.5)
             # eg: filtered_rows_points = [np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]]), np.ndarray([[0, 1], [0, 2], [1, 1]]), np.ndarray([[1, 1], [2, 1], [2, 2]])]
             
-            return sorted_contours, sorted_contours_old, sorted_rows_points
+            return sorted_filtered_contours, sorted_unfiltered_contours, sorted_rows_points
                 
         def initial_crop_img(self, 
                                contours: list,
@@ -819,7 +833,7 @@ class ImagePreprocessing:
                     next_x, next_y, next_w, next_h = cv2.boundingRect(next_contour)
                     # print(f'crop_img: {save_index}, {x}, {y}, {abs(x + w - self.img.shape[1])}, {abs(next_x)}, {right_margin_threshold}')
                     if abs(x + w - self.parent.img.shape[1]) < right_margin_threshold and abs(next_x) < left_margin_threshold:
-                        print(f'Merging: word_{i}_crop.jpg and word_{i+1}_crop.jpg need to merge')
+                        logging.info(f'Merging: word_{i}_crop.jpg and word_{i+1}_crop.jpg need to merge')
 
                         next_y_max = min(next_y + h, green_img.shape[0])
                         crop_img_next = green_img[next_y:next_y_max, next_x:next_x + next_w]
@@ -845,7 +859,6 @@ class ImagePreprocessing:
                     crop_imgs.append(crop_img)
                     cv2.imwrite(f'{self.parent.template_img_dir}/img_clip/cropped_img/initial_img/word_{save_index}_crop.jpg', crop_img)
                     save_index += 1
-            print(f'Number of cropped images: {len(crop_imgs)}')
             return crop_imgs
         # *********************************************
         # * Step 3: 对粗处理后的图片进行细化处理
