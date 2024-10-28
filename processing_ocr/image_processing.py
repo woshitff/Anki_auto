@@ -1011,7 +1011,6 @@ class ImagePreprocessing:
                 # condition to filter out unattached noises
                 if not self._remove_unattached_noise(contour, img_area):
                     continue
-
                 # condition to filter out attached noises
                 refined_contour = self._remove_attached_noise(contour)
                 x, y, w, h = cv2.boundingRect(refined_contour)
